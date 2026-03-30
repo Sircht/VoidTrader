@@ -6,6 +6,10 @@ const path = require('path');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const WFM_API_BASE = process.env.WFM_API_BASE || 'https://api.warframe.market/v1';
+const CACHE_TTL_MS = 5 * 60 * 1000;
+const ITEM_INDEX_TTL_MS = 60 * 60 * 1000;
+const MAX_RETRIES = 2;
 const WFM_API_BASE = 'https://api.warframe.market/v1';
 const CACHE_TTL_MS = 5 * 60 * 1000;
 
@@ -17,6 +21,23 @@ const requestLimiter = new Bottleneck({
   reservoir: 3,
   reservoirRefreshAmount: 3,
   reservoirRefreshInterval: 1000,
+  maxConcurrent: 3,
+  minTime: 340
+});
+
+const http = axios.create({
+  timeout: 12000,
+  headers: {
+    Accept: 'application/json',
+    'User-Agent': 'VoidTrader/1.1 (+https://warframe.market)'
+  }
+});
+
+const ordersCache = new Map();
+let itemIndexCache = {
+  timestamp: 0,
+  byNormalizedName: new Map()
+};
   maxConcurrent: 3
 });
 
@@ -27,6 +48,10 @@ function normalizeItemName(itemName) {
     .trim()
     .toLowerCase()
     .replace(/['’]/g, '')
+    .replace(/[^a-z0-9\s_-]/g, ' ')
+    .replace(/\s+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '');
     .replace(/[^a-z0-9\s_-]/g, '')
     .replace(/\s+/g, '_')
     .replace(/_+/g, '_');
@@ -55,6 +80,7 @@ function getFromCache(slug) {
     return null;
   }
 
+  return cached;
   return cached.data;
 }
 
@@ -65,6 +91,96 @@ function setCache(slug, data) {
   });
 }
 
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function requestJson(url) {
+  let lastError;
+
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt += 1) {
+    try {
+      const response = await requestLimiter.schedule(() => http.get(url));
+      return response.data;
+    } catch (error) {
+      lastError = error;
+      const status = error?.response?.status;
+      const shouldRetry = !status || status >= 500 || status === 429;
+
+      if (!shouldRetry || attempt === MAX_RETRIES) {
+        break;
+      }
+
+      const backoff = 250 * (2 ** attempt);
+      await delay(backoff);
+    }
+  }
+
+  throw lastError;
+}
+
+async function getItemIndex() {
+  const age = Date.now() - itemIndexCache.timestamp;
+  if (age < ITEM_INDEX_TTL_MS && itemIndexCache.byNormalizedName.size > 0) {
+    return itemIndexCache.byNormalizedName;
+  }
+
+  const url = `${WFM_API_BASE}/items`;
+  const data = await requestJson(url);
+  const items = data?.payload?.items || [];
+
+  const byNormalizedName = new Map();
+  for (const item of items) {
+    const displayName = item.item_name || item.en?.item_name || item.url_name;
+    const slug = item.url_name;
+    if (!displayName || !slug) {
+      continue;
+    }
+
+    byNormalizedName.set(normalizeItemName(displayName), slug);
+    byNormalizedName.set(normalizeItemName(slug), slug);
+  }
+
+  itemIndexCache = {
+    timestamp: Date.now(),
+    byNormalizedName
+  };
+
+  return byNormalizedName;
+}
+
+async function resolveSlug(inputItem) {
+  const normalized = normalizeItemName(inputItem);
+  if (!normalized) {
+    return null;
+  }
+
+  try {
+    const index = await getItemIndex();
+    return index.get(normalized) || normalized;
+  } catch {
+    return normalized;
+  }
+}
+
+async function fetchOrders(itemSlug) {
+  const cached = getFromCache(itemSlug);
+  if (cached) {
+    return {
+      orders: cached.data,
+      fromCache: true
+    };
+  }
+
+  const url = `${WFM_API_BASE}/items/${encodeURIComponent(itemSlug)}/orders`;
+  const data = await requestJson(url);
+  const orders = data?.payload?.orders || [];
+
+  setCache(itemSlug, orders);
+  return {
+    orders,
+    fromCache: false
+  };
 async function fetchOrders(itemSlug) {
   const cached = getFromCache(itemSlug);
   if (cached) {
@@ -89,6 +205,8 @@ function getOrderPlatform(order) {
 }
 
 function isOrderOnline(order) {
+  const status = (order.user?.status || '').toLowerCase();
+  return status === 'ingame' || status === 'online';
   return (order.user?.status || '').toLowerCase() === 'ingame';
 }
 
@@ -165,6 +283,18 @@ app.post('/api/best-seller', async (req, res) => {
     }
 
     const slugMap = new Map();
+    await Promise.all(items.map(async (item) => {
+      const slug = await resolveSlug(item);
+      if (slug) {
+        slugMap.set(slug, item);
+      }
+    }));
+
+    const slugs = [...new Set(slugMap.keys())];
+
+    if (!slugs.length) {
+      return res.status(400).json({ error: 'No valid items were detected.' });
+    }
     const slugs = items.map((item) => {
       const slug = normalizeItemName(item);
       slugMap.set(slug, item);
@@ -175,6 +305,7 @@ app.post('/api/best-seller', async (req, res) => {
 
     const sellers = new Map();
     const unavailableItems = [];
+    let cacheHits = 0;
 
     fetchResults.forEach((result, index) => {
       const slug = slugs[index];
@@ -185,6 +316,11 @@ app.post('/api/best-seller', async (req, res) => {
         return;
       }
 
+      if (result.value.fromCache) {
+        cacheHits += 1;
+      }
+
+      const sellerOrders = selectBestOrderPerSeller(result.value.orders);
       const sellerOrders = selectBestOrderPerSeller(result.value);
       if (!sellerOrders.size) {
         unavailableItems.push({ item: displayName, reason: 'No sell orders found' });
@@ -233,6 +369,12 @@ app.post('/api/best-seller', async (req, res) => {
       resolvedItemCount: slugs.length,
       unavailableItems,
       bestSeller,
+      topSellers: rankedSellers.slice(0, 10),
+      meta: {
+        cacheHits,
+        cacheMisses: slugs.length - cacheHits,
+        cacheTtlSeconds: CACHE_TTL_MS / 1000
+      }
       topSellers: rankedSellers.slice(0, 10)
     });
   } catch (error) {

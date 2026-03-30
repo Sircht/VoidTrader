@@ -14,6 +14,7 @@ const unavailableWrap = document.getElementById('unavailableWrap');
 const unavailableList = document.getElementById('unavailableList');
 const copyWhisperButton = document.getElementById('copyWhisper');
 const copyFeedback = document.getElementById('copyFeedback');
+const dataMeta = document.getElementById('dataMeta');
 
 let bestSellerState = null;
 let progressTimer = null;
@@ -75,6 +76,13 @@ function renderResult(payload) {
   });
 
   renderUnavailable(payload.unavailableItems);
+
+  if (payload.meta) {
+    dataMeta.textContent = `Dados: ${payload.meta.cacheHits} cache hit(s), ${payload.meta.cacheMisses} consulta(s) ao market.`;
+  } else {
+    dataMeta.textContent = '';
+  }
+
   results.classList.remove('hidden');
 }
 
