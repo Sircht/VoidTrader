@@ -2,7 +2,7 @@ name: Deploy VoidTrader to GitHub Pages
 
 on:
   push:
-    branches: ["main", "master", "work"]
+    branches: ["main", "work"]
   workflow_dispatch:
 
 permissions:
@@ -26,10 +26,6 @@ jobs:
 
       - name: Setup Pages
         uses: actions/configure-pages@v5
-
-      - name: Prepare Pages artifact
-        run: |
-          touch public/.nojekyll
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
