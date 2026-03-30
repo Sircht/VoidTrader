@@ -16,20 +16,8 @@ const copyWhisperButton = document.getElementById('copyWhisper');
 const copyFeedback = document.getElementById('copyFeedback');
 const dataMeta = document.getElementById('dataMeta');
 
-const WFM_API_BASE = 'https://api.warframe.market/v1';
-const CACHE_TTL_MS = 5 * 60 * 1000;
-const MAX_RETRIES = 2;
-const RETRY_BASE_MS = 250;
-const REQUEST_SPACING_MS = 340; // ~3 req/s
-
-const SERVER_API_BASE = (window.VOIDTRADER_API_BASE || '').trim();
-const IS_LOCALHOST = ['localhost', '127.0.0.1'].includes(window.location.hostname);
-const SHOULD_USE_SERVER_API = Boolean(SERVER_API_BASE) || IS_LOCALHOST;
-
 let bestSellerState = null;
 let progressTimer = null;
-let itemIndexCache = { timestamp: 0, byName: new Map() };
-const ordersCache = new Map();
 
 function setLoading(isLoading) {
   findButton.disabled = isLoading;
@@ -56,17 +44,6 @@ function setLoading(isLoading) {
 function setError(message) {
   errorBox.textContent = message;
   errorBox.classList.toggle('hidden', !message);
-}
-
-function normalizeItemName(itemName) {
-  return itemName
-    .trim()
-    .toLowerCase()
-    .replace(/['’]/g, '')
-    .replace(/[^a-z0-9\s_-]/g, ' ')
-    .replace(/\s+/g, '_')
-    .replace(/_+/g, '_')
-    .replace(/^_+|_+$/g, '');
 }
 
 function renderUnavailable(unavailableItems) {
@@ -101,229 +78,12 @@ function renderResult(payload) {
   renderUnavailable(payload.unavailableItems);
 
   if (payload.meta) {
-    const mode = payload.meta.source || 'server';
-    dataMeta.textContent = `Fonte: ${mode}. Cache hit(s): ${payload.meta.cacheHits || 0}.`;
-    if (mode === 'github-pages-direct-api') {
-      dataMeta.textContent += ' (GitHub Pages: API do Warframe Market direto)';
-    }
+    dataMeta.textContent = `Dados: ${payload.meta.cacheHits} cache hit(s), ${payload.meta.cacheMisses} consulta(s) ao market.`;
   } else {
     dataMeta.textContent = '';
   }
 
   results.classList.remove('hidden');
-}
-
-function compareSellers(a, b) {
-  if (b.items.length !== a.items.length) return b.items.length - a.items.length;
-  if (a.totalPrice !== b.totalPrice) return a.totalPrice - b.totalPrice;
-  if (a.online !== b.online) return a.online ? -1 : 1;
-  return a.username.localeCompare(b.username);
-}
-
-function isOnline(order) {
-  const status = (order.user?.status || '').toLowerCase();
-  return status === 'ingame' || status === 'online';
-}
-
-function selectBestOrderPerSeller(orders) {
-  const perSeller = new Map();
-
-  for (const order of orders) {
-    if (!order || order.order_type !== 'sell' || order.visible === false) continue;
-
-    const platform = (order.platform || order.user?.platform || '').toLowerCase();
-    if (platform && platform !== 'pc') continue;
-
-    const username = order.user?.ingame_name || order.user?.id;
-    const platinum = Number(order.platinum);
-    if (!username || !Number.isFinite(platinum) || platinum < 0) continue;
-
-    const candidate = { username, platinum, online: isOnline(order) };
-    const existing = perSeller.get(username);
-
-    if (!existing || candidate.platinum < existing.platinum ||
-      (candidate.platinum === existing.platinum && candidate.online && !existing.online)) {
-      perSeller.set(username, candidate);
-    }
-  }
-
-  return perSeller;
-}
-
-function wait(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function fetchJson(url) {
-  let lastError;
-
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt += 1) {
-    try {
-      const response = await fetch(url, { headers: { Accept: 'application/json' } });
-      const contentType = (response.headers.get('content-type') || '').toLowerCase();
-      const isJson = contentType.includes('application/json');
-
-      if (!response.ok) {
-        if (attempt < MAX_RETRIES && (response.status === 429 || response.status >= 500)) {
-          await wait(RETRY_BASE_MS * (2 ** attempt));
-          continue;
-        }
-        throw new Error(`HTTP ${response.status}`);
-      }
-
-      if (!isJson) {
-        throw new Error('Resposta inválida da API do market.');
-      }
-
-      return response.json();
-    } catch (error) {
-      lastError = error;
-      if (attempt < MAX_RETRIES) {
-        await wait(RETRY_BASE_MS * (2 ** attempt));
-      }
-    }
-  }
-
-  throw lastError || new Error('Falha ao consultar a API.');
-}
-
-async function getItemIndex() {
-  if (Date.now() - itemIndexCache.timestamp < 60 * 60 * 1000 && itemIndexCache.byName.size) {
-    return itemIndexCache.byName;
-  }
-
-  const data = await fetchJson(`${WFM_API_BASE}/items`);
-  const index = new Map();
-  const items = data?.payload?.items || [];
-
-  items.forEach((item) => {
-    const displayName = item.item_name || item.en?.item_name || item.url_name;
-    if (!displayName || !item.url_name) return;
-    index.set(normalizeItemName(displayName), item.url_name);
-    index.set(normalizeItemName(item.url_name), item.url_name);
-  });
-
-  itemIndexCache = { timestamp: Date.now(), byName: index };
-  return index;
-}
-
-function getOrderCache(slug) {
-  const cached = ordersCache.get(slug);
-  if (!cached) return null;
-  if (Date.now() - cached.timestamp > CACHE_TTL_MS) {
-    ordersCache.delete(slug);
-    return null;
-  }
-  return cached;
-}
-
-async function fetchOrders(slug) {
-  const cached = getOrderCache(slug);
-  if (cached) return { orders: cached.orders, fromCache: true };
-
-  const data = await fetchJson(`${WFM_API_BASE}/items/${encodeURIComponent(slug)}/orders`);
-  const orders = data?.payload?.orders || [];
-  ordersCache.set(slug, { timestamp: Date.now(), orders });
-  return { orders, fromCache: false };
-}
-
-async function runClientMode(items) {
-  const index = await getItemIndex();
-  const slugToDisplay = new Map();
-
-  items.forEach((name) => {
-    const normalized = normalizeItemName(name);
-    const slug = index.get(normalized) || normalized;
-    if (slug) slugToDisplay.set(slug, name);
-  });
-
-  const slugs = [...slugToDisplay.keys()];
-  const sellers = new Map();
-  const unavailableItems = [];
-  let cacheHits = 0;
-
-  for (let i = 0; i < slugs.length; i += 1) {
-    const slug = slugs[i];
-    const displayName = slugToDisplay.get(slug) || slug;
-
-    try {
-      const response = await fetchOrders(slug);
-      if (response.fromCache) cacheHits += 1;
-
-      const perSeller = selectBestOrderPerSeller(response.orders);
-      if (!perSeller.size) {
-        unavailableItems.push({ item: displayName, reason: 'No sell orders found' });
-      }
-
-      for (const order of perSeller.values()) {
-        const seller = sellers.get(order.username) || {
-          username: order.username,
-          online: false,
-          totalPrice: 0,
-          items: []
-        };
-
-        seller.online = seller.online || order.online;
-        seller.totalPrice += order.platinum;
-        seller.items.push({ name: displayName, slug, platinum: order.platinum });
-        sellers.set(order.username, seller);
-      }
-    } catch {
-      unavailableItems.push({ item: displayName, reason: 'API request failed' });
-    }
-
-    if (i < slugs.length - 1) {
-      await wait(REQUEST_SPACING_MS);
-    }
-  }
-
-  const ranked = [...sellers.values()]
-    .map((seller) => ({
-      ...seller,
-      totalPrice: Number(seller.totalPrice.toFixed(2)),
-      itemCount: seller.items.length
-    }))
-    .sort(compareSellers);
-
-  if (!ranked.length) throw new Error('No sellers found for provided items.');
-
-  return {
-    requestedItemCount: items.length,
-    resolvedItemCount: slugs.length,
-    unavailableItems,
-    bestSeller: ranked[0],
-    topSellers: ranked.slice(0, 10),
-    meta: {
-      source: 'github-pages-direct-api',
-      cacheHits,
-      cacheMisses: slugs.length - cacheHits,
-      cacheTtlSeconds: CACHE_TTL_MS / 1000
-    }
-  };
-}
-
-async function requestViaServer(items) {
-  const response = await fetch(`${SERVER_API_BASE}/api/best-seller`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ items })
-  });
-
-  const contentType = (response.headers.get('content-type') || '').toLowerCase();
-  const isJson = contentType.includes('application/json');
-
-  if (!response.ok) {
-    const payload = isJson ? await response.json().catch(() => ({})) : {};
-    throw new Error(payload.error || `HTTP ${response.status}`);
-  }
-
-  if (!isJson) {
-    throw new Error('Server did not return JSON.');
-  }
-
-  const payload = await response.json();
-  payload.meta = { ...(payload.meta || {}), source: 'server-api' };
-  return payload;
 }
 
 async function findBestSeller() {
@@ -342,19 +102,18 @@ async function findBestSeller() {
   setLoading(true);
 
   try {
-    let payload;
+    const response = await fetch('/api/best-seller', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ items })
+    });
 
-    if (!SHOULD_USE_SERVER_API) {
-      payload = await runClientMode(items);
-    } else {
-      try {
-        payload = await requestViaServer(items);
-      } catch {
-        payload = await runClientMode(items);
-      }
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(data.error || 'Failed to retrieve sellers.');
     }
 
-    renderResult(payload);
+    renderResult(data);
   } catch (error) {
     results.classList.add('hidden');
     setError(error.message || 'Unexpected error.');
@@ -364,10 +123,12 @@ async function findBestSeller() {
 }
 
 async function copyWhisper() {
-  if (!bestSellerState) return;
+  if (!bestSellerState) {
+    return;
+  }
 
   const itemNames = bestSellerState.items.map((item) => item.name).join(', ');
-  const message = `/w ${bestSellerState.username} Hi! I want to buy: ${itemNames}. Total: ${bestSellerState.totalPrice} platinum (VoidTrader)`;
+  const message = `/w ${bestSellerState.username} Hi! I want to buy: ${itemNames} (VoidTrader)`;
 
   try {
     await navigator.clipboard.writeText(message);
