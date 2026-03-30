@@ -10,6 +10,8 @@ const WFM_API_BASE = process.env.WFM_API_BASE || 'https://api.warframe.market/v1
 const CACHE_TTL_MS = 5 * 60 * 1000;
 const ITEM_INDEX_TTL_MS = 60 * 60 * 1000;
 const MAX_RETRIES = 2;
+const WFM_API_BASE = 'https://api.warframe.market/v1';
+const CACHE_TTL_MS = 5 * 60 * 1000;
 
 app.use(cors());
 app.use(express.json({ limit: '1mb' }));
@@ -36,6 +38,10 @@ let itemIndexCache = {
   timestamp: 0,
   byNormalizedName: new Map()
 };
+  maxConcurrent: 3
+});
+
+const ordersCache = new Map();
 
 function normalizeItemName(itemName) {
   return itemName
@@ -46,6 +52,9 @@ function normalizeItemName(itemName) {
     .replace(/\s+/g, '_')
     .replace(/_+/g, '_')
     .replace(/^_+|_+$/g, '');
+    .replace(/[^a-z0-9\s_-]/g, '')
+    .replace(/\s+/g, '_')
+    .replace(/_+/g, '_');
 }
 
 function parseItems(inputItems) {
@@ -72,6 +81,7 @@ function getFromCache(slug) {
   }
 
   return cached;
+  return cached.data;
 }
 
 function setCache(slug, data) {
@@ -171,6 +181,23 @@ async function fetchOrders(itemSlug) {
     orders,
     fromCache: false
   };
+async function fetchOrders(itemSlug) {
+  const cached = getFromCache(itemSlug);
+  if (cached) {
+    return cached;
+  }
+
+  const url = `${WFM_API_BASE}/items/${encodeURIComponent(itemSlug)}/orders`;
+  const response = await requestLimiter.schedule(() => axios.get(url, {
+    timeout: 10000,
+    headers: {
+      Accept: 'application/json'
+    }
+  }));
+
+  const orders = response?.data?.payload?.orders || [];
+  setCache(itemSlug, orders);
+  return orders;
 }
 
 function getOrderPlatform(order) {
@@ -180,6 +207,7 @@ function getOrderPlatform(order) {
 function isOrderOnline(order) {
   const status = (order.user?.status || '').toLowerCase();
   return status === 'ingame' || status === 'online';
+  return (order.user?.status || '').toLowerCase() === 'ingame';
 }
 
 function selectBestOrderPerSeller(orders) {
@@ -267,6 +295,11 @@ app.post('/api/best-seller', async (req, res) => {
     if (!slugs.length) {
       return res.status(400).json({ error: 'No valid items were detected.' });
     }
+    const slugs = items.map((item) => {
+      const slug = normalizeItemName(item);
+      slugMap.set(slug, item);
+      return slug;
+    }).filter(Boolean);
 
     const fetchResults = await Promise.allSettled(slugs.map((slug) => fetchOrders(slug)));
 
@@ -288,6 +321,7 @@ app.post('/api/best-seller', async (req, res) => {
       }
 
       const sellerOrders = selectBestOrderPerSeller(result.value.orders);
+      const sellerOrders = selectBestOrderPerSeller(result.value);
       if (!sellerOrders.size) {
         unavailableItems.push({ item: displayName, reason: 'No sell orders found' });
         return;
@@ -341,6 +375,7 @@ app.post('/api/best-seller', async (req, res) => {
         cacheMisses: slugs.length - cacheHits,
         cacheTtlSeconds: CACHE_TTL_MS / 1000
       }
+      topSellers: rankedSellers.slice(0, 10)
     });
   } catch (error) {
     console.error('best-seller error:', error.message);
