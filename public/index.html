@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>VoidTrader</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <main class="app">
+    <header>
+      <h1>VoidTrader</h1>
+      <p>Optimize your Warframe trades by finding sellers with the most matching items.</p>
+    </header>
+
+    <section class="card">
+      <label for="itemsInput">Items (one per line)</label>
+      <textarea id="itemsInput" placeholder="Example:
+Volt Prime Chassis
+Nova Prime Systems
+Saryn Prime Blueprint"></textarea>
+      <button id="findButton">Find Best Seller</button>
+
+      <div id="loading" class="loading hidden" aria-live="polite">
+        <span class="spinner"></span>
+        <span>Scanning warframe.market...</span>
+      </div>
+
+      <div class="progress-wrap hidden" id="progressWrap">
+        <div class="progress-bar" id="progressBar"></div>
+      </div>
+
+      <p id="error" class="error hidden"></p>
+    </section>
+
+    <section class="card hidden" id="results">
+      <h2>Best Seller Match</h2>
+      <div class="summary-grid">
+        <div><span class="label">Seller</span><strong id="sellerName"></strong></div>
+        <div><span class="label">Items Available</span><strong id="itemCount"></strong></div>
+        <div><span class="label">Total Price</span><strong id="totalPrice"></strong></div>
+        <div><span class="label">Online Status</span><strong id="onlineStatus"></strong></div>
+      </div>
+
+      <h3>Items from Seller</h3>
+      <ul id="itemsList" class="items-list"></ul>
+
+      <button id="copyWhisper" class="secondary">Copy Whisper Message</button>
+      <p id="copyFeedback" class="muted"></p>
+      <p id="dataMeta" class="muted"></p>
+
+      <details id="unavailableWrap" class="hidden">
+        <summary>Unavailable Items</summary>
+        <ul id="unavailableList"></ul>
+      </details>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
