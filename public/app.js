@@ -78,34 +78,12 @@ function renderResult(payload) {
   renderUnavailable(payload.unavailableItems);
 
   if (payload.meta) {
-    dataMeta.textContent = `Cache hit(s): ${payload.meta.cacheHits || 0}. Cache miss(es): ${payload.meta.cacheMisses || 0}.`;
+    dataMeta.textContent = `Dados: ${payload.meta.cacheHits} cache hit(s), ${payload.meta.cacheMisses} consulta(s) ao market.`;
   } else {
     dataMeta.textContent = '';
   }
 
   results.classList.remove('hidden');
-}
-
-async function requestBestSeller(items) {
-  const response = await fetch('/api/best-seller', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ items })
-  });
-
-  const contentType = (response.headers.get('content-type') || '').toLowerCase();
-  const isJson = contentType.includes('application/json');
-
-  if (!response.ok) {
-    const payload = isJson ? await response.json().catch(() => ({})) : {};
-    throw new Error(payload.error || `Server error: HTTP ${response.status}`);
-  }
-
-  if (!isJson) {
-    throw new Error('Server response is not JSON.');
-  }
-
-  return response.json();
 }
 
 async function findBestSeller() {
@@ -124,8 +102,18 @@ async function findBestSeller() {
   setLoading(true);
 
   try {
-    const payload = await requestBestSeller(items);
-    renderResult(payload);
+    const response = await fetch('/api/best-seller', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ items })
+    });
+
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(data.error || 'Failed to retrieve sellers.');
+    }
+
+    renderResult(data);
   } catch (error) {
     results.classList.add('hidden');
     setError(error.message || 'Unexpected error.');
@@ -135,10 +123,12 @@ async function findBestSeller() {
 }
 
 async function copyWhisper() {
-  if (!bestSellerState) return;
+  if (!bestSellerState) {
+    return;
+  }
 
   const itemNames = bestSellerState.items.map((item) => item.name).join(', ');
-  const message = `/w ${bestSellerState.username} Hi! I want to buy: ${itemNames}. Total: ${bestSellerState.totalPrice} platinum (VoidTrader)`;
+  const message = `/w ${bestSellerState.username} Hi! I want to buy: ${itemNames} (VoidTrader)`;
 
   try {
     await navigator.clipboard.writeText(message);
